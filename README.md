@@ -12,4 +12,4 @@ To create a new release.
 3. Run `git push origin vX.Y.Z`
 
 ## License
-This project is licensed under the GNU General Public License. See `LICENSE` for more information.
+This project is licensed under the MIT License. See `LICENSE` for more information.
