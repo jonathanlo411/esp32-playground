@@ -1,0 +1,149 @@
+name: Build and Publish Release
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+jobs:
+  build_and_release:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for proper tag comparison
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install PlatformIO
+      run: pip install platformio
+    
+    - name: Build firmware
+      run: pio run
+    
+    - name: Generate release notes
+      id: generate_release_notes
+      run: |
+        # Get the previous tag (skip the current tag)
+        PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -n 1)
+        
+        if [ -z "$PREVIOUS_TAG" ]; then
+          # If no previous tag exists, get all commits
+          COMMIT_RANGE="HEAD"
+          echo "No previous tag found, getting all commits"
+        else
+          # Get commits between previous tag and current tag
+          COMMIT_RANGE="$PREVIOUS_TAG..${{ github.ref_name }}"
+          echo "Getting commits from $PREVIOUS_TAG to ${{ github.ref_name }}"
+        fi
+        
+        # Get all commit messages with their types
+        COMMITS=$(git log $COMMIT_RANGE --pretty=format:"%s|||%an" --reverse)
+        
+        # Initialize release notes
+        RELEASE_NOTES="## What's Changed"$'\n\n'
+        
+        # Arrays to store different types of commits
+        FEATURES=""
+        FIXES=""
+        DOCS=""
+        CHORES=""
+        OTHERS=""
+        
+        # Process each commit
+        while IFS='|||' read -r message author; do
+          if [[ -n "$message" ]]; then
+            # Extract commit type and description
+            if [[ $message =~ ^feat(\(.+\))?!?:(.*)$ ]]; then
+              FEATURES="${FEATURES}* ${BASH_REMATCH[2]# } (@${author})"$'\n'
+            elif [[ $message =~ ^fix(\(.+\))?!?:(.*)$ ]]; then
+              FIXES="${FIXES}* ${BASH_REMATCH[2]# } (@${author})"$'\n'
+            elif [[ $message =~ ^docs(\(.+\))?!?:(.*)$ ]]; then
+              DOCS="${DOCS}* ${BASH_REMATCH[2]# } (@${author})"$'\n'
+            elif [[ $message =~ ^chore(\(.+\))?!?:(.*)$ ]]; then
+              CHORES="${CHORES}* ${BASH_REMATCH[2]# } (@${author})"$'\n'
+            elif [[ $message =~ ^(style|refactor|perf|test|build|ci)(\(.+\))?!?:(.*)$ ]]; then
+              OTHERS="${OTHERS}* ${BASH_REMATCH[3]# } (@${author})"$'\n'
+            else
+              # Non-semantic commits go to "Other Changes"
+              OTHERS="${OTHERS}* ${message} (@${author})"$'\n'
+            fi
+          fi
+        done <<< "$COMMITS"
+        
+        # Build release notes sections
+        if [[ -n "$FEATURES" ]]; then
+          RELEASE_NOTES="${RELEASE_NOTES}### 🚀 Features"$'\n'"${FEATURES}"$'\n'
+        fi
+        
+        if [[ -n "$FIXES" ]]; then
+          RELEASE_NOTES="${RELEASE_NOTES}### 🐛 Bug Fixes"$'\n'"${FIXES}"$'\n'
+        fi
+        
+        if [[ -n "$DOCS" ]]; then
+          RELEASE_NOTES="${RELEASE_NOTES}### 📚 Documentation"$'\n'"${DOCS}"$'\n'
+        fi
+        
+        if [[ -n "$CHORES" ]]; then
+          RELEASE_NOTES="${RELEASE_NOTES}### 🧹 Chores"$'\n'"${CHORES}"$'\n'
+        fi
+        
+        if [[ -n "$OTHERS" ]]; then
+          RELEASE_NOTES="${RELEASE_NOTES}### 🔧 Other Changes"$'\n'"${OTHERS}"$'\n'
+        fi
+        
+        # If no commits found, add a default message
+        if [[ "$RELEASE_NOTES" == "## What's Changed"$'\n\n' ]]; then
+          RELEASE_NOTES="${RELEASE_NOTES}No changes found in this release."$'\n'
+        fi
+        
+        # Set the release notes as an environment variable
+        {
+          echo "RELEASE_NOTES<<EOF"
+          echo "$RELEASE_NOTES"
+          echo "EOF"
+        } >> $GITHUB_ENV
+        
+        # Debug output
+        echo "Generated release notes:"
+        echo "$RELEASE_NOTES"
+    
+    - name: Package firmware binaries
+      run: |
+        # Create a directory for release artifacts
+        mkdir -p release_artifacts
+        
+        # Copy all built firmware files
+        # Adjust the path based on your PlatformIO environment name
+        # Common locations: .pio/build/*/firmware.bin or .pio/build/*/firmware.elf
+        find .pio/build -name "*.bin" -o -name "*.elf" | while read file; do
+          cp "$file" release_artifacts/
+        done
+        
+        # Create a zip archive of all firmware files
+        cd release_artifacts
+        zip -r ../firmware-${{ github.ref_name }}.zip .
+        cd ..
+    
+    - name: Create .tar.gz archive of repository files
+      run: |
+        git archive --format=tar.gz --prefix=${{ github.event.repository.name }}/ -o source-${{ github.ref_name }}.tar.gz HEAD
+    
+    - name: Upload Release Assets
+      id: release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        body: ${{ env.RELEASE_NOTES }}
+        files: |
+          firmware-${{ github.ref_name }}.zip
+          source-${{ github.ref_name }}.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Output Release URL
+      run: |
+        echo "Release URL: ${{ steps.release.outputs.html_url }}"
