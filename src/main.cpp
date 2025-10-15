@@ -1,70 +1,78 @@
 /*
- * ESP32 Button LED Blink
+ * ESP32 Button LED Blink with Interrupts and Debouncing
  *
  * Wiring:
- * - LED: GPIO 15 -> 220Ω resistor -> LED (+) -> LED (-) -> GND
- * - Button: GPIO 0 -> Button -> GND (uses internal pull-up)
- *
- * Hardware:
- * - ESP32 Dev Board
- * - LED (any color)
- * - 220Ω resistor
- * - Push button
+ * - LED: GPIO 2 -> 220Ω resistor -> LED (+) -> LED (-) -> GND
+ * - Button: GPIO 4 -> Button -> GND (uses internal pull-up)
  *
  * Behavior:
  * 1. Press button: LED blinks for 3 seconds
  * 2. Press during blink: Cancel blinking
  * 3. Hold button: LED continuously blinks while held
  */
-
 #include <Arduino.h>
 #include "led_helper.h"
 
-const int LED_PIN = 15;
-const int BUTTON_PIN = 0;
+const int LED_PIN = 2;
+const int BUTTON_PIN = 4;
 
 // Timing constants
-const int BLINK_INTERVAL = 100;    // On/off time in ms
-const int BLINK_DURATION = 3000;   // Total blink time in ms
-const int HOLD_THRESHOLD = 350;    // Time to detect "hold" in ms
-const int DEBOUNCE_DELAY = 50;     // Debounce time in ms
+const int BLINK_INTERVAL = 100;
+const int BLINK_DURATION = 3000;
+const int HOLD_THRESHOLD = 350;
+const int DEBOUNCE_DELAY = 50;
 
 // LED controller
 LEDController led(LED_PIN);
 
-// Button state tracking
-bool lastButtonState = HIGH;
-bool buttonState = HIGH;
-unsigned long buttonPressTime = 0;
+// Volatile variables (accessed in ISR and main loop)
+volatile bool buttonEventFlag = false;
+volatile unsigned long lastInterruptTime = 0;
+
+// State tracking
+bool lastStableButtonState = HIGH;
 bool buttonHandled = false;
-bool wasHolding = false;  // Track if we were in hold mode
-unsigned long lastDebounceTime = 0;
+bool wasHolding = false;
+unsigned long buttonPressTime = 0;
+
+// ISR (Interrupt Service Routine) - keep it SHORT and FAST
+void IRAM_ATTR handleButtonInterrupt() {
+  unsigned long currentTime = millis();
+  
+  // Debounce in ISR - ignore if too soon after last interrupt
+  if (currentTime - lastInterruptTime > DEBOUNCE_DELAY) {
+    lastInterruptTime = currentTime;
+    buttonEventFlag = true;
+  }
+}
 
 void setup() {
   led.begin();
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   
+  // Attach interrupt on CHANGE (both rising and falling edges)
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButtonInterrupt, CHANGE);
+  
   Serial.begin(115200);
-  Serial.println("ESP32 Button LED Controller Ready");
+  Serial.println("ESP32 Button LED Controller Ready (Interrupt Mode)");
 }
 
 void loop() {
-  // Read button with debouncing
-  int reading = digitalRead(BUTTON_PIN);
-  
-  // If button state changed, reset debounce timer
-  if (reading != lastButtonState) {
-    lastDebounceTime = millis();
-  }
-  
-  // Only update button state if debounce time has passed
-  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
-    // If button state has actually changed
-    if (reading != buttonState) {
-      buttonState = reading;
+  // Check if button event occurred
+  if (buttonEventFlag) {
+    buttonEventFlag = false;
+    
+    // Read current stable button state
+    delay(5); // Small delay to let button settle
+    bool currentButtonState = digitalRead(BUTTON_PIN);
+    
+    // Only process if state actually changed
+    if (currentButtonState != lastStableButtonState) {
+      lastStableButtonState = currentButtonState;
       
-      // Button was just pressed
-      if (buttonState == LOW) {
+      // Button just pressed (LOW)
+      if (currentButtonState == LOW) {
+        Serial.println("Button pressed");
         buttonPressTime = millis();
         buttonHandled = false;
         
@@ -72,11 +80,13 @@ void loop() {
         if (led.getIsBlinking()) {
           led.stopBlink();
           Serial.println("Blink cancelled");
-          buttonHandled = true;  // Mark as handled so we don't start a new blink
+          buttonHandled = true;
         }
       }
-      // Button was just released
+      // Button just released (HIGH)
       else {
+        unsigned long pressDuration = millis() - buttonPressTime;
+        
         // If we were holding, turn off LED
         if (wasHolding) {
           led.stopBlink();
@@ -84,30 +94,35 @@ void loop() {
           wasHolding = false;
           buttonHandled = true;
         }
-        // If button wasn't held long enough and wasn't used to cancel
-        else if (!buttonHandled && (millis() - buttonPressTime < HOLD_THRESHOLD)) {
-          // Start timed blink
+        // Short press - start timed blink
+        else if (!buttonHandled && pressDuration < HOLD_THRESHOLD) {
           led.startBlink(BLINK_DURATION, BLINK_INTERVAL, BLINK_INTERVAL);
           Serial.println("Timed blink started");
         }
+        
         buttonHandled = false;
       }
     }
   }
   
-  lastButtonState = reading;
-  
-  // Check if button is being held down
-  if (buttonState == LOW && !buttonHandled && 
-      (millis() - buttonPressTime >= HOLD_THRESHOLD)) {
-    // Button is held - continuous blink mode
-    if (led.getIsBlinking()) {
-      led.stopBlink();  // Cancel any timed blink first
+  // Check for hold condition (button still pressed after threshold)
+  if (lastStableButtonState == LOW && !buttonHandled) {
+    unsigned long holdTime = millis() - buttonPressTime;
+    
+    if (holdTime >= HOLD_THRESHOLD) {
+      if (!wasHolding) {
+        // First time detecting hold
+        if (led.getIsBlinking()) {
+          led.stopBlink();
+        }
+        wasHolding = true;
+        Serial.println("Hold detected - continuous blink");
+      }
+      // Keep the continuous blink active while holding
+      led.continuousBlink(BLINK_INTERVAL, BLINK_INTERVAL);
     }
-    wasHolding = true;  // Mark that we're in hold mode
-    led.continuousBlink(BLINK_INTERVAL, BLINK_INTERVAL);
   }
   
-  // Update LED state (for timed blinking)
+  // Update LED state
   led.update();
 }
