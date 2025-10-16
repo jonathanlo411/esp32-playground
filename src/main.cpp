@@ -17,8 +17,8 @@ const int LED_PIN = 2;
 const int BUTTON_PIN = 4;
 
 // Timing constants
-const int BLINK_INTERVAL = 100;
-const int BLINK_DURATION = 3000;
+const int BLINK_INTERVAL = 75;
+const int BLINK_DURATION = 9000;
 const int HOLD_THRESHOLD = 350;
 const int DEBOUNCE_DELAY = 50;
 
